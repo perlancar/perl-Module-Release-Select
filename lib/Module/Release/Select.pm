@@ -1,5 +1,6 @@
 package Module::Release::Select;
 
+use 5.010001;
 use strict;
 use warnings;
 
@@ -14,409 +15,97 @@ our @EXPORT_OK = qw($RE select_release select_releases);
 
 our $RE =
     qr{
-          (?&SELECTORS) (?{ $_ = $^R->[1] })
+          #(?&EXPR) (?{ $_ = $^R->[1] })
+          (?&SIMPLE_EXPR) (?{ $_ = $^R->[1] })
 
           (?(DEFINE)
-              (?<SELECTORS>
+              (?<EXPR>
                   (?{ [$^R, []] })
-                  (?&SELECTOR) # [[$^R, []], $selector]
+                  (?&AND_EXPR)
                   (?{ [$^R->[0][0], [$^R->[1]]] })
                   (?:
-                      \s*,\s*
-                      (?&SELECTOR)
+                      die 1;
+                      \s*[,|]\s*
+                      (?&AND_EXPR)
                       (?{
                           push @{$^R->[0][1]}, $^R->[1];
                           $^R->[0];
                       })
                   )*
                   \s*
-              ) # SELECTORS
+              ) # EXPR
 
-              (?<SELECTOR>
+              (?<AND_EXPR>
                   (?{ [$^R, []] })
-                  (?&SIMPLE_SELECTOR) # [[$^R, []], $simple_selector]
+                  (?&SIMPLE_EXPR)
                   (?{ [$^R->[0][0], [$^R->[1]]] })
                   (?:
-                      (\s*>\s*|\s*\+\s*|\s*~\s*|\s+)
-                      (?{
-                          my $comb = $^N;
-                          $comb =~ s/^\s+//; $comb =~ s/\s+$//;
-                          $comb = " " if $comb eq '';
-                          push @{$^R->[1]}, {combinator=>$comb};
-                          $^R;
-                      })
-
-                      (?&SIMPLE_SELECTOR)
+                      \s*[&]\s*
+                      (?&SIMPLE_EXPR)
                       (?{
                           push @{$^R->[0][1]}, $^R->[1];
                           $^R->[0];
                       })
                   )*
-              ) # SELECTOR
-
-              (?<SIMPLE_SELECTOR>
-                  (?:
-                      (?:
-                          # type selector + optional filters
-                          ((?&TYPE_NAME))
-                          (?{ [$^R, {type=>$^N}] })
-                          (?:
-                              (?&FILTER) # [[$^R, $simple_selector], $filter]
-                              (?{
-                                  push @{ $^R->[0][1]{filters} }, $^R->[1];
-                                  $^R->[0];
-                              })
-                              (?:
-                                  \s*
-                                  (?&FILTER)
-                                  (?{
-                                      push @{ $^R->[0][1]{filters} }, $^R->[1];
-                                      $^R->[0];
-                                  })
-                              )*
-                          )?
-                      )
-                  |
-                      (?:
-                          # optional type selector + one or more filters
-                          ((?&TYPE_NAME))?
-                          (?{
-                              # XXX sometimes $^N is ' '?
-                              my $t = $^N // '*';
-                              $t = '*' if $t eq ' ';
-                              [$^R, {type=>$t}] })
-                          (?&FILTER) # [[$^R, $simple_selector], $filter]
-                          (?{
-                              push @{ $^R->[0][1]{filters} }, $^R->[1];
-                              $^R->[0];
-                          })
-                          (?:
-                              \s*
-                              (?&FILTER)
-                              (?{
-                                  push @{ $^R->[0][1]{filters} }, $^R->[1];
-                                  $^R->[0];
-                              })
-                          )*
-                      )
-                  )
-              ) # SIMPLE_SELECTOR
-
-              (?<TYPE_NAME>
-                  [A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z0-9_]+)*|\*
-              )
-
-              (?<FILTER>
-                  (?{ [$^R, {}] })
-                  (
-                      (?&ATTR_SELECTOR) # [[$^R0, {}], [$attr, $op, $val]]
-                      (?{
-                          $^R->[0][1]{type}  = 'attr_selector';
-                          $^R->[0][1]{attr}  = $^R->[1][0];
-                          $^R->[0][1]{op}    = $^R->[1][1] if defined $^R->[1][1];
-                          $^R->[0][1]{value} = $^R->[1][2] if @{ $^R->[1] } > 2;
-                          $^R->[0];
-                      })
-                  |
-                      \.((?&TYPE_NAME))
-                      (?{
-                          $^R->[1]{type}  = 'class_selector';
-                          $^R->[1]{class} = $^N;
-                          $^R;
-                      })
-                  |
-                      \#(\w+)
-                      (?{
-                          $^R->[1]{type} = 'id_selector';
-                          $^R->[1]{id}   = $^N;
-                          $^R;
-                      })
-                  |
-                      (?&PSEUDOCLASS) # [[$^R, {}], [$pseudoclass, \@args]]
-                      (?{
-                          $^R->[0][1]{type}         = 'pseudoclass';
-                          $^R->[0][1]{pseudoclass}  = $^R->[1][0];
-                          $^R->[0][1]{args}         = $^R->[1][1] if @{ $^R->[1] } > 1;
-                          $^R->[0];
-                      })
-                  )
-              ) # FILTER
-
-              (?<ATTR_SELECTOR>
-                  \[\s*
-                  (?{ [$^R, []] }) # [$^R, [$subjects, $op, $literal]]
-                  (?&ATTR_SUBJECTS) # [[$^R, [{name=>$name, args=>$args}, ...]]
-                  (?{
-                      #use Data::Dmp; say "D:setting subjects: ", dmp $^R->[1];
-                      push @{ $^R->[0][1] }, $^R->[1];
-                      $^R->[0];
-                  })
-
-                  (?:
-                      (
-                          \s*(?:=~|!~)\s* |
-                          \s*(?:!=|<>|>=?|<=?|==?)\s* |
-                          \s++(?:eq|ne|lt|gt|le|ge)\s++ |
-                          \s+(?:isnt|is|has|hasnt|in|notin)\s+
-                      )
-                      (?{
-                          my $op = $^N;
-                          $op =~ s/^\s+//; $op =~ s/\s+$//;
-                          $^R->[1][1] = $op;
-                          $^R;
-                      })
-
-                      (?:
-                          (?&LITERAL) # [[$^R0, [$attr, $op]], $literal]
-                          (?{
-                              push @{ $^R->[0][1] }, $^R->[1];
-                              $^R->[0];
-                          })
-                      |
-                          (\w[^\s\]]*) # allow unquoted string
-                          (?{
-                              $^R->[1][2] = $^N;
-                              $^R;
-                          })
-                      )
-                  )?
-                  \s*\]
-              ) # ATTR_SELECTOR
-
-              (?<ATTR_NAME>
-                  [A-Za-z_][A-Za-z0-9_]*
-              )
-
-              (?<ATTR_SUBJECT>
-                  (?{ [$^R, []] }) # [$^R, [name, \@args]]
-                  ((?&ATTR_NAME))
-                  (?{
-                      #say "D:pushing attribute subject: $^N";
-                      push @{ $^R->[1] }, $^N;
-                      $^R;
-                  })
-                  (?:
-                      # attribute arguments
-                      \s*\(\s* (*PRUNE)
-                      (?{
-                          $^R->[1][1] = [];
-                          $^R;
-                      })
-                      (?:
-                          (?&LITERAL)
-                          (?{
-                              #use Data::Dmp; say "D:pushing argument: ", dmp $^R->[1];
-                              push @{ $^R->[0][1][1] }, $^R->[1];
-                              $^R->[0];
-                          })
-                          (?:
-                              \s*,\s*
-                              (?&LITERAL)
-                              (?{
-                                  #use Data::Dmp; say "D:pushing argument: ", dmp $^R->[1];
-                                  push @{ $^R->[0][1][1] }, $^R->[1];
-                                  $^R->[0];
-                              })
-                          )*
-                      )?
-                      \s*\)\s*
-                  )?
-              ) # ATTR_SUBJECT
-
-              (?<ATTR_SUBJECTS>
-                  (?{ $_i1 = 0; [$^R, []] })
-                  (?&ATTR_SUBJECT) # [[$^R, [$name, \@args]]
-                  (?{
-                      $_i1++;
-                      unless ($_i1 > 1) { # to prevent backtracking from executing tihs code block twice
-                          #say "D:pushing subject(1)";
-                          push @{ $^R->[0][1] }, {
-                              name => $^R->[1][0],
-                              (args => $^R->[1][1]) x !!defined($^R->[1][1]),
-                          };
-                      }
-                      $^R->[0];
-                  })
-                  (?:
-                      \s*\.\s*
-                      (?{ $_i1 = 0; $^R })
-                      (?&ATTR_SUBJECT) # [[$^R, $name, \@args]]
-                      (?{
-                          $_i1++;
-                          unless ($_i1 > 1) { # to prevent backtracking from executing this code block twice
-                              #say "D:pushing subject(2)";
-                              push @{ $^R->[0][1] }, {
-                                  name => $^R->[1][0],
-                                  (args => $^R->[1][1]) x !!defined($^R->[1][1]),
-                              };
-                          }
-                          $^R->[0];
-                      })
-                  )*
-              ) # ATTR_SUBJECTS
-
-              (?<LITERAL>
-                  (?&LITERAL_ARRAY)
-              |
-                  (?&LITERAL_NUMBER)
-              |
-                  (?&LITERAL_STRING_DQUOTE)
-              |
-                  (?&LITERAL_STRING_SQUOTE)
-              |
-                  (?&LITERAL_REGEX)
-              |
-                  true (?{ [$^R, 1] })
-              |
-                  false (?{ [$^R, 0] })
-              |
-                  null (?{ [$^R, undef] })
-              ) # LITERAL
-
-              (?<LITERAL_ARRAY>
-                  \[\s*
-                  (?{ [$^R, []] })
-                  (?:
-                      (?&LITERAL) # [[$^R, []], $val]
-                      (?{ [$^R->[0][0], [$^R->[1]]] })
-                      \s*
-                      (?:
-                          (?:
-                              ,\s* (?&LITERAL)
-                              (?{ push @{$^R->[0][1]}, $^R->[1]; $^R->[0] })
-                          )*
-                      |
-                          (?: [^,\]]|\z ) (?{ _fail "Expected ',' or '\x5d'" })
-                      )
-                  )?
                   \s*
-                  (?:
-                      \]
-                  |
-                      (?:.|\z) (?{ _fail "Expected closing of array" })
-                  )
-              ) # LITERAL_ARRAY
+              ) # AND_EXPR
 
-              (?<LITERAL_NUMBER>
-                  (
-                      -?
-                      (?: 0 | [1-9]\d* )
-                      (?: \. \d+ )?
-                      (?: [eE] [-+]? \d+ )?
-                  )
-                  (?{ [$^R, 0+$^N] })
-              )
-
-              (?<LITERAL_STRING_DQUOTE>
-                  (
-                      "
-                      (?:
-                          [^\\"]+
-                      |
-                          \\ [0-7]{1,3}
-                      |
-                          \\ x [0-9A-Fa-f]{1,2}
-                      |
-                          \\ ["\\'tnrfbae]
-                      )*
-                      "
-                  )
-                  (?{ [$^R, eval $^N] })
-              )
-
-              (?<LITERAL_STRING_SQUOTE>
-                  (
-                      '
-                      (?:
-                          [^\\']+
-                      |
-                          \\ .
-                      )*
-                      '
-                  )
-                  (?{ [$^R, eval $^N] })
-              )
-
-              (?<LITERAL_REGEX>
-                  (
-                      (?:
-                          (?:
-                              /
-                              (?:
-                                  [^/\\]+
-                              |
-                                  \\ .
-                              )*
-                              /
-                          ) |
-                          (?:
-                              qr\(
-                              (?:
-                                  [^\)\\]+
-                              |
-                                  \\ .
-                              )*
-                              \)
-                          )
-                      )
-                      [ims]*
-                  )
-                  (?{ my $code = substr($^N, 0, 2) eq "qr" ? $^N : "qr$^N"; my $re = eval $code; die if $@; [$^R, $re] })
-              )
-
-              (?<PSEUDOCLASS_NAME>
-                  [A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*
-              )
-
-              (?<PSEUDOCLASS>
-                  :
+              (?<SIMPLE_EXPR>
                   (?:
                       (?:
-                          (has|not)
-                          (?{ [$^R, [$^N]] })
-                          \(\s*
-                          (?:
-                              (?&LITERAL)
-                              (?{
-                                  push @{ $^R->[0][1][1] }, $^R->[1];
-                                  $^R->[0];
-                              })
-                          |
-                              ((?&SELECTORS))
-                              (?{
-                                  push @{ $^R->[0][1][1] }, $^N;
-                                  $^R->[0];
-                              })
-                          )
-                          \s*\)
+                          # ver_comp
+                          (?: version \s*)?
+                          ((?&OP))? \s*
+                          (?{ [$^R, {type=>"version", op=> $^N // "=" }] })
+                          ((?&VER_VALUE))
+                          (?{ $^R->[1]{val} = $^N; $^R })
                       )
                   |
                       (?:
-                          ((?&PSEUDOCLASS_NAME))
-                          (?{ [$^R, [$^N]] })
-                          (?:
-                              \(\s*
-                              (?&LITERAL)
-                              (?{
-                                  push @{ $^R->[0][1][1] }, $^R->[1];
-                                  $^R->[0];
-                              })
-                              (?:
-                                  \s*,\s*
-                                  (?&LITERAL)
-                                  (?{
-                                      push @{ $^R->[0][1][1] }, $^R->[1];
-                                      $^R->[0];
-                                  })
-                              )*
-                              \s*\)
-                          )?
+                          # date_comp
+                          date \s*
+                          ((?&OP)) \s*
+                          (?{ [$^R, {type=>"date", op=> $^N }] })
+                          # DATE_VALUE
+                          \{ ([^\{]+) \}
+                          (?{ $^R->[1]{val} = $^N; $^R })
+                      )
+                  |
+                      (?:
+                          # author_comp
+                          author \s*
+                          ((?&OP)) \s*
+                          (?{ [$^R, {type=>"author", op=> $^N }] })
+                          # STR_VALUE
+                          \" ([^"]+|\\\\|\\")* \"
+                          (?{ $^R->[1]{val} = $^N; $^R }) # TODO: parse string literal
                       )
                   )
-              ) # PSEUDOCLASS
+              ) # SIMPLE_EXPR
+
+              (?<OP>
+                  =|!=|<|>|<=|>=|=~|!~
+              )
+
+              (?<VER_VALUE>
+                  v?
+                  [0-9]+(?:\.[0-9]+)*
+              |
+                  [0-9]+(?:\.[0-9]+)+(?:_[0-9]+)
+              ) # VER_VALUE
+
           ) # DEFINE
   }x;
 
+sub parse_release {
+    state $re = qr{\A\s*$RE\s*\z};
+
+    local $_ = shift;
+    local $^R;
+    eval { $_ =~ $re } and return $_;
+    die $@ if $@;
+    return undef; ## no critic: Subroutines::ProhibitExplicitReturnUndef
+}
 
 1;
 # ABSTRACT: Notation to select release(s)
@@ -677,40 +366,54 @@ exact version numbers or by author and date.
 
 =head1 NOTATION SYNTAX
 
-A I<release specification> is a chain of one or more simple release
-specifications separated by comma (C<,>) or pipe (C<|>). For example, C<< 0.001,
-0.003 .. 0.007, >= 0.010 >> (versions 0.001, 0.003 to 0.007, and 0.010 or
-higher).
+Grammar:
 
-A I<simple release specification> is a chain of expressions separated by
-ampersand (C<&>). For example, C<< >= 0.003 & <= 0.010 >>.
+ EXPR ::= AND_EXPR ( ("," | "|") AND_EXPR )*
 
-An I<expression> is left operand followed by binary operator followed by right
-operand. Operand is optional if it is "version". For example, C<< date <=
-{yesterday} >>, C<< >= v0.001 >>.
+ AND_EXPR ::= SIMPLE_EXPR ( "&" SIMPLE_EXPR )*
 
-List of I<binary operator>s:
+ SIMPLE_EXPR ::= COMP
 
- | operator | name                     | operand type (left)             |       | precedence |
- |----------+--------------------------+---------------------------------+------------|
- | ..       | range                    | releases                        | lowest     |
- | -        | releases before          | releases (left), uint (right)   | low        |
- | +        | releases before          | releases (left), uint (right)   | low        |
- | =        | equal-to                 | version, string, or date (left) | medium     |
- | !=       | not-equal-to             | version, string, or date      | medium     |
- | >        | greater-than             | version, string, or date      | medium     |
- | >=       | greater-than-or-equal-to | version, string, or date      | medium     |
- | <        | less-than                | version, string, or date      | medium     |
- | <=       | less-than-or-equal-to    | version, string, or date      | medium     |
- | =~       | regex matching           |
-An operand is either a release specification inside parentheses (C<( ... )>), or
-a literal.
+ COMP ::= VER_COMP
+        | DATE_COMP
+        | AUTHOR_COMP
 
-A literal is either a version literal, a date literal,
+ VER_COMP ::= "version" OP VER_VALUE
+            | OP VER_VALUE
+            | VER_VALUE              ; for when OP ='='
 
-A I<version literal> is either: 1) a dot-separated series of numbers optionally
-prefixed by "v" and optionally followed by "_" and numbers (e.g. 1, v2, 1.2, or
-1.2.3_001); 2) "latest"; 3) "oldest".
+ DATE_COMP ::= "date" OP DATE_VAL
+
+ AUTHOR_COMP ::= "author" OP STR_VAL
+
+ OP ::= "=" | "!=" | ">" | ">=" | "<" | "<=" | "=~" | "!~"
+
+ VER_VALUE ::= VER_LITERAL
+             | VER_OFFSET
+
+ VER_OFFSET ::= FUNC ( "+" | "-") [1-9][0-9]*
+              | FUNC
+
+ VER_FUNC ::= "VER_FUNC_NAME" ( "(" EXPR? ")" )?
+            | VER_TERM
+
+ VER_FUNC_NAME ::= [A-Za-z_][A-Za-z0-9]*
+
+ VER_TERM ::= VER_LITERAL
+            | "(" EXPR ")"
+
+ STR_VAL ::= STR_LITERAL
+
+ STR_LITERAL ::= '"' ( [^"\] | "\\" | "\" '"' )* '"'
+
+ DATE_VAL ::= DATE_LIERAL
+
+ DATE_LITERAL ::= "{" [^{]+ "}"
+
+ VER_LITERAL ::= ("v")? [0-9]+ ( "." [0-9]+ )*
+                   | ("v")? [0-9]+ ( "." [0-9]+ )+ ( "_" [0-9]+ )?
+                   | "latest"
+                   | "oldest"
 
 
 =head1 FUNCTIONS
