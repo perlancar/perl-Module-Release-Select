@@ -238,7 +238,7 @@ Some examples on selecting release(s):
  my $rel = select_release({detail=>1}, '0.002', \@releases); # => {version=>0.002, date=>'2022-06-23T23:21:58', ...}
 
  # select releases, returns empty list when no releases are selected
- my $rel = select_releases('LATEST-2 .. LATEST', \@releases);   # => 0.015, 0.014, 0.013
+ my $rel = select_releases('>= latest-2 & <= latest', \@releases);   # => 0.015, 0.014, 0.013
 
 
 =head2 Expression grammar
