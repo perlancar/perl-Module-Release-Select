@@ -6,6 +6,8 @@ use warnings;
 
 use Exporter 'import';
 
+require String::Escape;
+
 # AUTHORITY
 # DATE
 # DIST
@@ -15,8 +17,8 @@ our @EXPORT_OK = qw($RE select_release select_releases);
 
 our $RE =
     qr{
-          #(?&EXPR) (?{ $_ = $^R->[1] })
-          (?&SIMPLE_EXPR) (?{ $_ = $^R->[1] })
+          (?&EXPR) (?{ $_ = $^R->[1] })
+          #(?&SIMPLE_EXPR) (?{ $_ = $^R->[1] })
 
           (?(DEFINE)
               (?<EXPR>
@@ -24,7 +26,6 @@ our $RE =
                   (?&AND_EXPR)
                   (?{ [$^R->[0][0], [$^R->[1]]] })
                   (?:
-                      die 1;
                       \s*[,|]\s*
                       (?&AND_EXPR)
                       (?{
@@ -58,7 +59,7 @@ our $RE =
                           ((?&OP))? \s*
                           (?{ [$^R, {type=>"version", op=> $^N // "=" }] })
                           ((?&VER_VALUE))
-                          (?{ $^R->[1]{val} = $^N; $^R })
+                          (?{ $^R->[0][1]{val} = $^R->[1]; $^R->[0] })
                       )
                   |
                       (?:
@@ -77,8 +78,8 @@ our $RE =
                           ((?&OP)) \s*
                           (?{ [$^R, {type=>"author", op=> $^N }] })
                           # STR_VALUE
-                          \" ([^"]+|\\\\|\\")* \"
-                          (?{ $^R->[1]{val} = $^N; $^R }) # TODO: parse string literal
+                          (\" (?:[^"]+|\\\\|\\")* \")
+                          (?{ $^R->[1]{val} = String::Escape::unqqbackslash($^N); $^R })
                       )
                   )
               ) # SIMPLE_EXPR
@@ -88,16 +89,31 @@ our $RE =
               )
 
               (?<VER_VALUE>
-                  v?
-                  [0-9]+(?:\.[0-9]+)*
-              |
-                  [0-9]+(?:\.[0-9]+)+(?:_[0-9]+)
-              ) # VER_VALUE
+                  ((?&VER_LITERAL)) \s*
+                  (?{ [$^R, {literal=>$^N, offset=>0}] })
+                  (?:
+                      \s* ([+-]?[0-9]+) \s*
+                      (?{ $^R->[1]{offset} = $^N; $^R })
+                  )?
+              )
+
+              (?<VER_LITERAL>
+                  (
+                      v?
+                      (
+                          [0-9]+(?:\.[0-9]+)+(?:_[0-9]+)
+                      |
+                          [0-9]+(?:\.[0-9]+)*
+                      )
+                  )
+              |   latest
+              |   oldest
+              ) # VER_LITERAL
 
           ) # DEFINE
   }x;
 
-sub parse_release {
+sub parse_releases_expr {
     state $re = qr{\A\s*$RE\s*\z};
 
     local $_ = shift;
@@ -112,19 +128,34 @@ sub parse_release {
 
 =head1 SYNOPSIS
 
-The notation:
+ use Module::Release::Select qw(select_release select_releases);
 
- # exact version number
+ my @releases = (0.005, 0.004, 0.003, 0.002, 0.001);
+
+ my $rel = select_release('0.002', \@releases);       # => 0.002
+ my $rel = select_release('0.002 + 1', \@releases);   # => 0.003
+ my $rel = select_release('> 0.002', \@releases);     # => 0.005
+ my $rel = select_release('latest', \@releases);      # => 0.005
+ my $rel = select_release('latest-1', \@releases);    # => 0.004
+
+ my @rels = select_releases('> oldest', \@releases);  # => (0.005, 0.004, 0.003, 0.002)
+
+
+=head1 DESCRIPTION
+
+This module lets you select one or more releases via an expression. Some example
+expressions:
+
+ # exact version number ('=')
  0.002
  =0.002     # ditto
 
- # version number range with >, >=, <, <=, !=, and .., & to join
- # condition with "and" logic, | to join with "or" logic.
+ # version number range with '>', '>=', '<', '<=', '!='. use '&' to join
+ # multiple conditions with "and" logic, use '|' or ',' to join with "or" logic.
  >0.002
  >=0.002
  >=0.002 & <=0.015
  <0.002 | >0.015
- 0.001 .. 0.015        # practically all releases
  0.001, 0.002, 0.003
 
  # "latest" and "oldest" can replace version number
@@ -133,45 +164,26 @@ The notation:
  <latest           # all releases except the latest
  != latest         # ditto
  >oldest           # all releases except the oldest
- oldest .. latest  # practically all releases
- latest .. oldest  # note: won't select any because LATEST > OLDEST
 
  # +n and -m to refer to n releases after and n releases before
  latest-1       # the release before the latest
  0.002 + 1      # the release after 0.002
- > (oldest+1)   # all releases except the oldest and one after that (OLDEST+1)
+ > (oldest+1)   # all releases except the oldest and one after that (oldest+1)
 
  # select by date, any date supported by DateTime::Format::Natural is supported
- date < yesterday        # all releases released 2 days ago
+ date < {yesterday}      # all releases released 2 days ago
  date > {2 months ago}   # all releases after 2 months ago
 
  # select by author
- author=PERLANCAR             # all releases released by PERLANCAR
- author != "PERLANCAR"        # all releases not released by PERLANCAR
- author=PERLANCAR & > 0.005   # all releases after 0.005 that are released by PERLANCAR
+ author="PERLANCAR"             # all releases released by PERLANCAR
+ author != "PERLANCAR"          # all releases not released by PERLANCAR
+ author="PERLANCAR" & > 0.005   # all releases after 0.005 that are released by PERLANCAR
 
- # "latest" & "oldest" can take argument
- latest(author=PERLANCAR)      # the latest release by PERLANCAR
- latest(author=PERLANCAR) + 1  # the release after the latest release by PERLANCAR
- oldest(date > {2022-10-01})   # the oldest release after 2022-10-01
-
- # not yet supported, but can be supported in the future
- # abstract =~ /foo/              # all releases with abstract matching a regex
- # distribution ne "App-orgadb"   # all releases with distribution not equal to "App-orgadb"
- # first is true                  # all releases with "first" key being true
-
-Using the module:
-
- use Module::Release::Select qw(select_release select_releases);
-
- # the array below is releases of App-orgadb. it must be an array of hashrefs
- # which must be sorted newest-first and each hashref contains at least this
- # key: 'version'; additional keys are needed when specifying using notation
- # that searches associated keys, e.g. searching by date will require the 'date'
- # key, searching by author will require the 'author' key).
- #
- # the simpler form of releases is accepted: array of version numbers. Using
- # this releases data, you can only specify version number or LATEST/OLDEST).
+To actually select releases, you provide a list of releases in the form of
+version numbers in descending order. If you want to select by date or author,
+each release will need to be a hashref containing C<date> and C<author> keys.
+Below is an example of a list of releases for L<App::orgadb> distribution. This
+structure is returned by L<App::MetaCPANUtils>' C<list_metacpan_release>:
 
  my @releases = (
     {
@@ -185,138 +197,7 @@ Using the module:
       status       => "latest",
       version      => 0.015,
     },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-10-17T13:17:44",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.014",
-      status       => "cpan",
-      version      => 0.014,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-10-16T12:59:21",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.013",
-      status       => "backpan",
-      version      => 0.013,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-10-15T03:44:35",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.012",
-      status       => "backpan",
-      version      => 0.012,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-10-15T02:36:14",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.011",
-      status       => "backpan",
-      version      => 0.011,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-10-08T17:29:39",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.010",
-      status       => "backpan",
-      version      => "0.010",
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-10-08T16:29:18",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.009",
-      status       => "backpan",
-      version      => 0.009,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-09-26T08:50:37",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.008",
-      status       => "backpan",
-      version      => 0.008,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-09-26T08:50:26",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.007",
-      status       => "backpan",
-      version      => 0.007,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-09-09T12:09:27",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.006",
-      status       => "backpan",
-      version      => 0.006,
-    },
-    {
-      abstract     => "An opinionated Org addressbook toolset",
-      author       => "PERLANCAR",
-      date         => "2022-08-13T00:05:38",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.005",
-      status       => "backpan",
-      version      => 0.005,
-    },
-    {
-      abstract     => "An opinionated Org addressbook tool",
-      author       => "PERLANCAR",
-      date         => "2022-07-04T12:06:34",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.004",
-      status       => "backpan",
-      version      => 0.004,
-    },
-    {
-      abstract     => "An opinionated Org addressbook tool",
-      author       => "PERLANCAR",
-      date         => "2022-07-04T05:10:45",
-      distribution => "App-orgadb",
-      first        => "",
-      maturity     => "released",
-      release      => "App-orgadb-0.003",
-      status       => "backpan",
-      version      => 0.003,
-    },
+    ...
     {
       abstract     => "An opinionated Org addressbook tool",
       author       => "PERLANCAR",
@@ -341,6 +222,8 @@ Using the module:
     },
  );
 
+Some examples on selecting release(s):
+
  # select a single release, if notation selects multiple releases, the latest
  # one will be picked. returns undef when no releases are selected.
  my $rel = select_release('0.002', \@releases);       # => 0.002
@@ -358,15 +241,7 @@ Using the module:
  my $rel = select_releases('LATEST-2 .. LATEST', \@releases);   # => 0.015, 0.014, 0.013
 
 
-=head1 DESCRIPTION
-
-This module defines a notation to select releases. Releases can be selected by
-exact version numbers or by author and date.
-
-
-=head1 NOTATION SYNTAX
-
-Grammar:
+=head2 Expression grammar
 
  EXPR ::= AND_EXPR ( ("," | "|") AND_EXPR )*
 
@@ -391,29 +266,20 @@ Grammar:
  VER_VALUE ::= VER_LITERAL
              | VER_OFFSET
 
- VER_OFFSET ::= FUNC ( "+" | "-") [1-9][0-9]*
-              | FUNC
-
- VER_FUNC ::= "VER_FUNC_NAME" ( "(" EXPR? ")" )?
-            | VER_TERM
-
- VER_FUNC_NAME ::= [A-Za-z_][A-Za-z0-9]*
-
- VER_TERM ::= VER_LITERAL
-            | "(" EXPR ")"
+ VER_OFFSET ::= VER_LITERAL ("+" | "-") [0-9]+
 
  STR_VAL ::= STR_LITERAL
 
  STR_LITERAL ::= '"' ( [^"\] | "\\" | "\" '"' )* '"'
 
- DATE_VAL ::= DATE_LIERAL
+ DATE_VAL ::= DATE_LITERAL
 
  DATE_LITERAL ::= "{" [^{]+ "}"
 
  VER_LITERAL ::= ("v")? [0-9]+ ( "." [0-9]+ )*
-                   | ("v")? [0-9]+ ( "." [0-9]+ )+ ( "_" [0-9]+ )?
-                   | "latest"
-                   | "oldest"
+               | ("v")? [0-9]+ ( "." [0-9]+ )+ ( "_" [0-9]+ )?
+               | "latest"
+               | "oldest"
 
 
 =head1 FUNCTIONS
@@ -422,6 +288,24 @@ Grammar:
 
 
 =head2 select_releases
+
+
+=head1 TODO
+
+These notations are not yet supported but might be supported in the future:
+
+ # "latest" & "oldest" can take argument
+ latest(author="PERLANCAR")       # the latest release by PERLANCAR
+ latest(author="PERLANCAR") + 1   # the release after the latest release by PERLANCAR
+ oldest(date > {2022-10-01})      # the oldest release after 2022-10-01
+
+ # functions
+
+ # abstract =~ /foo/              # all releases with abstract matching a regex
+
+ # distribution ne "App-orgadb"   # all releases with distribution not equal to "App-orgadb"
+
+ # first is true                  # all releases with "first" key being true
 
 
 =head1 SEE ALSO
