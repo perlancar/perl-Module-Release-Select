@@ -123,6 +123,21 @@ sub parse_releases_expr {
     return undef; ## no critic: Subroutines::ProhibitExplicitReturnUndef
 }
 
+sub select_releases {
+    my $opts = ref $_[0] eq 'HASH' ? {%{shift}} : {};
+    my $expr = shift;
+    my $rels = shift;
+}
+
+sub select_release {
+    my $opts = ref $_[0] eq 'HASH' ? {%{shift}} : {};
+    my $expr = shift;
+    my $rels = shift;
+
+    $opts->{single} = 1;
+    select_releases($opts, $expr, $rels);
+}
+
 1;
 # ABSTRACT: Notation to select release(s)
 
@@ -286,8 +301,40 @@ Some examples on selecting release(s):
 
 =head2 select_release
 
+Usage:
+
+ my $rel = select_release( [ \%opts , ] $expr, \@releases );
+
+Equivalent to C<< select_releases({%opts, single=>1}, $expr, \@releases) >>. See
+L</select_releases> for more details on list of known options.
 
 =head2 select_releases
+
+ my @rels = select_release( [ \%opts , ] $expr, \@releases );
+
+Select releases from C<@releases> using expression C<$expr>. Will die on invalid
+syntax in expression.
+
+Known options:
+
+=over
+
+=item * detail
+
+Bool. If true, will return detailed release records instead of just version
+numbers.
+
+=item * single
+
+Bool. If true, will return only a single release instead of multiple.
+
+=item * oldest
+
+Bool. By default, when expression selects multiple releases and only one is
+requested, the newest is returned. If this option is set to true, then the
+oldest will be returned instead.
+
+=back
 
 
 =head1 TODO
