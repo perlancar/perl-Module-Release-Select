@@ -13,7 +13,39 @@ require String::Escape;
 # DIST
 # VERSION
 
-our @EXPORT_OK = qw($RE select_release select_releases);
+our @EXPORT_OK = qw(
+                       $RE
+                       parse_releases_expr
+                       select_releases
+                       select_release
+               );
+
+sub _remove_space {
+    my $str = shift;
+    $str =~ s/\s+//g;
+    $str;
+}
+
+sub _parse_regexp {
+    require Regexp::Util;
+    my $str = shift;
+    my $re = Regexp::Util::deserialize_regexp("qr".$str."i");
+    die "Regexp '$str' contains eval" if Regexp::Util::regexp_seen_evals($re);
+    $re;
+}
+
+sub _parse_date {
+    require DateTime::Format::Natural;
+    my $str = shift;
+    my $dt = DateTime::Format::Natural->new->parse_datetime($str);
+    die "Unknown datetime expression $str" unless defined $dt;
+    $dt;
+}
+sub _parse_string {
+    require String::Escape;
+    my $str = shift;
+    {literal=>String::Escape::unqqbackslash($str)};
+}
 
 our $RE =
     qr{
@@ -58,8 +90,13 @@ our $RE =
                           (?: version \s*)?
                           ((?&OP))? \s*
                           (?{ [$^R, {type=>"version", op=> $^N // "=" }] })
-                          ((?&VER_VALUE))
-                          (?{ $^R->[0][1]{val} = $^R->[1]; $^R->[0] })
+                          (?:
+                              ((?&VER_VALUE))
+                              (?{ $^R->[0][1]{val} = $^R->[1]; $^R->[0] })
+                          |
+                              ((?&REGEX))
+                              (?{ $^R->[0][1]{val} = $^R->[1]; $^R->[0] })
+                          )
                       )
                   |
                       (?:
@@ -67,9 +104,14 @@ our $RE =
                           date \s*
                           ((?&OP)) \s*
                           (?{ [$^R, {type=>"date", op=> $^N }] })
-                          # DATE_VALUE
-                          \{ ([^\{]+) \}
-                          (?{ $^R->[1]{val} = $^N; $^R })
+                          (?:
+                              # DATE_VALUE
+                              \{ ([^\{]+) \}
+                              (?{ $^R->[1]{val} = {datetime=>_parse_date($^N)}; $^R })
+                          |
+                              ((?&REGEX))
+                              (?{ $^R->[0][1]{val} = $^R->[1]; $^R->[0] })
+                          )
                       )
                   |
                       (?:
@@ -77,9 +119,14 @@ our $RE =
                           author \s*
                           ((?&OP)) \s*
                           (?{ [$^R, {type=>"author", op=> $^N }] })
-                          # STR_VALUE
-                          (\" (?:[^"]+|\\\\|\\")* \")
-                          (?{ $^R->[1]{val} = String::Escape::unqqbackslash($^N); $^R })
+                          (?:
+                              # STR_VALUE
+                              (\" (?:[^"]+|\\\\|\\")* \")
+                              (?{ $^R->[1]{val} = _parse_string($^N); $^R })
+                          |
+                              ((?&REGEX))
+                              (?{ $^R->[0][1]{val} = $^R->[1]; $^R->[0] })
+                          )
                       )
                   )
               ) # SIMPLE_EXPR
@@ -92,9 +139,14 @@ our $RE =
                   ((?&VER_LITERAL)) \s*
                   (?{ [$^R, {literal=>$^N, offset=>0}] })
                   (?:
-                      \s* ([+-]?[0-9]+) \s*
-                      (?{ $^R->[1]{offset} = $^N; $^R })
+                      \s* ([+-] \s* [0-9]+) \s*
+                      (?{ $^R->[1]{offset} = _remove_space($^N); $^R })
                   )?
+              )
+
+              (?<REGEX>
+                  (/(?:[^/]+|\\/)*/)
+                  (?{ [$^R, {regexp=>_parse_regexp($^N)}] })
               )
 
               (?<VER_LITERAL>
@@ -123,14 +175,217 @@ sub parse_releases_expr {
     return undef; ## no critic: Subroutines::ProhibitExplicitReturnUndef
 }
 
+sub _get_verobj {
+    my ($pver, $rels) = @_;
+    my ($ver0, $verobj0, $index0);
+    if ($pver->{literal} eq 'latest') {
+        $index0 = 0;
+        $ver0 = $rels->[0]{version};
+        $verobj0 = version->parse($ver0);
+    } elsif ($pver->{literal} eq 'oldest') {
+        $index0 = $#{$rels};
+        $ver0 = $rels->[-1]{version};
+        $verobj0 = version->parse($ver0);
+    } else {
+        eval { $verobj0 = version->parse($pver->{literal}) };
+        die "Invalid version literal '$pver->{literal}': $@" if $@;
+        for my $i (0 .. $#{$rels}) {
+            my $verobj2 = version->parse($rels->[$i]{version});
+            if ($verobj2 == $verobj0) {
+                $index0 = $i;
+                $ver0 = $rels->[$i]{version};
+                last;
+            }
+        }
+    }
+
+    return ($ver0, $verobj0) unless $pver->{offset};
+    die "Can't compute version $pver->{literal} ".
+        ($pver->{offset} > 0 ? "+ $pver->{offset}" : "- ".abs($pver->{offset})).
+        " because that version is not found in releases"
+        unless defined $index0;
+    my $index = $index0 - $pver->{offset};
+    if ($index < 0) {
+        warn "There are no releases newer than (".
+            abs($pver->{offset})." release(s) ".($pver->{offset} > 0 ? "after" : "before")." $pver->{literal}".
+            "), will be using the newest release ($rels->[0]{version})";
+        $index = 0;
+    } elsif ($index > $#{$rels}) {
+        warn "There are no releases older than (".
+            abs($pver->{offset})." release(s) ".($pver->{offset} > 0 ? "before" : "after")." $pver->{literal}".
+            "), will be using the oldest release ($rels->[-1]{version})";
+        $index = $#{$rels};
+    }
+    ($rels->[$index]{version}, version->parse($rels->[$index]{version}));
+}
+
 sub select_releases {
-    my $opts = ref $_[0] eq 'HASH' ? {%{shift}} : {};
+    my $opts = ref $_[0] eq 'HASH' ? {%{shift @_}} : {};
     my $expr = shift;
-    my $rels = shift;
+    my $rels = [ map {ref $_ eq 'HASH' ? $_ : {version=>$_}} @{ shift @_ }];
+
+  CHECK_RELEASES:
+    {
+        my $last_verobj;
+        for my $i (0..$#{$rels}) {
+            my $rel = $rels->[$i];
+            if (!defined($rel->{version})) {
+                die "releases[$i]: No version defined";
+            }
+            my $verobj;
+            eval { $verobj = version->parse($rel->{version}) };
+            if ($@) {
+                die "releases[$i]: Invalid version '$rel->{version}': $@";
+            }
+            if (defined $last_verobj) {
+                unless ($verobj < $last_verobj) {
+                    die "releases[$i]: Not older than previous record; releases must contain release in descending order";
+                }
+            }
+            $last_verobj = $verobj;
+        }
+    }
+
+    my $pexpr = parse_releases_expr($expr); # "p" = parsed
+    die "Can't parse releases expr '$expr'" unless defined $pexpr;
+
+    return unless @$rels;
+
+    my @selected_and_rels;
+    for my $and_pexpr (@$pexpr) {
+        my @selected_comp_rels = @$rels;
+        for my $comp_pexpr (@$and_pexpr) {
+            my $type = $comp_pexpr->{type};
+            my $op   = $comp_pexpr->{op};
+            my $code;
+            if ($type eq 'version') {
+                if ($op eq '=') {
+                    die "Version literal expected after '='" unless defined $comp_pexpr->{val}{literal};
+                    my ($ver, $verobj) = _get_verobj($comp_pexpr->{val}, $rels);
+                    $code = sub { version->parse($_[0]{version}) == $verobj };
+                } elsif ($op eq '!=') {
+                    die "Version literal expected after '!='" unless defined $comp_pexpr->{val}{literal};
+                    my ($ver, $verobj) = _get_verobj($comp_pexpr->{val}, $rels);
+                    $code = sub { version->parse($_[0]{version}) != $verobj };
+                } elsif ($op eq '>') {
+                    die "Version literal expected after '='" unless defined $comp_pexpr->{val}{literal};
+                    my ($ver, $verobj) = _get_verobj($comp_pexpr->{val}, $rels);
+                    $code = sub { version->parse($_[0]{version}) > $verobj };
+                } elsif ($op eq '>=') {
+                    die "Version literal expected after '='" unless defined $comp_pexpr->{val}{literal};
+                    my ($ver, $verobj) = _get_verobj($comp_pexpr->{val}, $rels);
+                    $code = sub { version->parse($_[0]{version}) >= $verobj };
+                } elsif ($op eq '<') {
+                    die "Version literal expected after '='" unless defined $comp_pexpr->{val}{literal};
+                    my ($ver, $verobj) = _get_verobj($comp_pexpr->{val}, $rels);
+                    $code = sub { version->parse($_[0]{version}) < $verobj };
+                } elsif ($op eq '<=') {
+                    die "Version literal expected after '='" unless defined $comp_pexpr->{val}{literal};
+                    my ($ver, $verobj) = _get_verobj($comp_pexpr->{val}, $rels);
+                    $code = sub { version->parse($_[0]{version}) <= $verobj };
+                } elsif ($op eq '=~') {
+                    die "Regexp expected after '=~'" unless defined $comp_pexpr->{val}{regexp};
+                    $code = sub { $_[0]{version} =~ $comp_pexpr->{val}{regexp} };
+                } elsif ($op eq '!~') {
+                    die "Regexp expected after '=~'" unless defined $comp_pexpr->{val}{regexp};
+                    $code = sub { $_[0]{version} =~ $comp_pexpr->{val}{regexp} };
+                } else {
+                    die "BUG: Unknown operator '$op'";
+                }
+            } elsif ($type eq 'author') {
+                if ($op eq '=') {
+                    die "String literal expected after '='" unless defined $comp_pexpr->{val}{literal};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; lc($_[0]{author}) eq lc($comp_pexpr->{val}{literal}) };
+                } elsif ($op eq '!=') {
+                    die "String literal expected after '!='" unless defined $comp_pexpr->{val}{literal};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; lc($_[0]{author}) ne lc($comp_pexpr->{val}{literal}) };
+                } elsif ($op eq '>') {
+                    die "String literal expected after '>'" unless defined $comp_pexpr->{val}{literal};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; lc($_[0]{author}) gt lc($comp_pexpr->{val}{literal}) };
+                } elsif ($op eq '>=') {
+                    die "String literal expected after '>='" unless defined $comp_pexpr->{val}{literal};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; lc($_[0]{author}) ge lc($comp_pexpr->{val}{literal}) };
+                } elsif ($op eq '<') {
+                    die "String literal expected after '<'" unless defined $comp_pexpr->{val}{literal};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; lc($_[0]{author}) lt lc($comp_pexpr->{val}{literal}) };
+                } elsif ($op eq '<=') {
+                    die "String literal expected after '<='" unless defined $comp_pexpr->{val}{literal};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; lc($_[0]{author}) le lc($comp_pexpr->{val}{literal}) };
+                } elsif ($op eq '=~') {
+                    die "Regexp expected after '=~'" unless defined $comp_pexpr->{val}{regexp};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; $_[0]{author} =~ $comp_pexpr->{val}{regexp} };
+                } elsif ($op eq '!~') {
+                    die "Regexp expected after '=~'" unless defined $comp_pexpr->{val}{regexp};
+                    $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; $_[0]{author} !~ $comp_pexpr->{val}{regexp} };
+                } else {
+                    die "BUG: Unknown operator '$op'";
+                }
+            } elsif ($type eq 'date') {
+                require DateTime;
+                require DateTime::Format::Natural;
+                if ($op eq '=') {
+                    die "Date literal expected after '='" unless defined $comp_pexpr->{val}{datetime};
+                    $code = sub { my $dt0 = $_[0]{date}; die "Release $_[0]{version} does not have date" unless defined $dt0; my $dt = DateTime::Format::Natural->new->parse_datetime($dt0) or die "Can't parse date literal '$dt0'"; DateTime->compare($dt, $comp_pexpr->{val}{datetime}) == 0 };
+                } elsif ($op eq '!=') {
+                    die "Date literal expected after '='" unless defined $comp_pexpr->{val}{datetime};
+                    $code = sub { my $dt0 = $_[0]{date}; die "Release $_[0]{version} does not have date" unless defined $dt0; my $dt = DateTime::Format::Natural->new->parse_datetime($dt0) or die "Can't parse date literal '$dt0'"; DateTime->compare($dt, $comp_pexpr->{val}{datetime}) != 0 };
+                } elsif ($op eq '>') {
+                    die "Date literal expected after '='" unless defined $comp_pexpr->{val}{datetime};
+                    $code = sub { my $dt0 = $_[0]{date}; die "Release $_[0]{version} does not have date" unless defined $dt0; my $dt = DateTime::Format::Natural->new->parse_datetime($dt0) or die "Can't parse date literal '$dt0'"; DateTime->compare($dt, $comp_pexpr->{val}{datetime}) > 0 };
+                } elsif ($op eq '>=') {
+                    die "Date literal expected after '='" unless defined $comp_pexpr->{val}{datetime};
+                    $code = sub { my $dt0 = $_[0]{date}; die "Release $_[0]{version} does not have date" unless defined $dt0; my $dt = DateTime::Format::Natural->new->parse_datetime($dt0) or die "Can't parse date literal '$dt0'"; DateTime->compare($dt, $comp_pexpr->{val}{datetime}) >= 0 };
+                } elsif ($op eq '<') {
+                    die "Date literal expected after '='" unless defined $comp_pexpr->{val}{datetime};
+                    $code = sub { my $dt0 = $_[0]{date}; die "Release $_[0]{version} does not have date" unless defined $dt0; my $dt = DateTime::Format::Natural->new->parse_datetime($dt0) or die "Can't parse date literal '$dt0'"; DateTime->compare($dt, $comp_pexpr->{val}{datetime}) < 0 };
+                } elsif ($op eq '<=') {
+                    die "Date literal expected after '='" unless defined $comp_pexpr->{val}{datetime};
+                    $code = sub { my $dt0 = $_[0]{date}; die "Release $_[0]{version} does not have date" unless defined $dt0; my $dt = DateTime::Format::Natural->new->parse_datetime($dt0) or die "Can't parse date literal '$dt0'"; DateTime->compare($dt, $comp_pexpr->{val}{datetime}) <= 0 };
+                } elsif ($op eq '=~') {
+                    die "Regexp expected after '=~'" unless defined $comp_pexpr->{val}{regexp};
+                    $code = sub { die "Release $_[0]{version} does not have date" unless defined $_[0]{date}; $_[0]{date} =~ $comp_pexpr->{val}{regexp} };
+                } elsif ($op eq '!~') {
+                    die "Regexp expected after '=~'" unless defined $comp_pexpr->{val}{regexp};
+                    $code = sub { die "Release $_[0]{version} does not have date" unless defined $_[0]{date}; $_[0]{date} !~ $comp_pexpr->{val}{regexp} };
+                } else {
+                    die "BUG: Unknown operator '$op'";
+                }
+            } else {
+                die "BUG: Unknown comparison type '$type'";
+            }
+
+            @selected_comp_rels = grep { $code->($_) } @selected_comp_rels;
+            #use Data::Dmp (); use DD; print "result of selecting ".Data::Dmp::dmp($comp_pexpr).": "; dd \@selected_comp_rels;
+        } # for comp_pexpr
+
+      L1:
+        for my $rel (@selected_comp_rels) {
+            # do not add if already added
+            for (@selected_and_rels) { last L1 if "$_" eq "$rel" }
+            push @selected_and_rels, $rel;
+        }
+    } # for and_expr
+
+    # sort
+    @selected_and_rels = sort { version->parse($b->{version}) <=> version->parse($a->{version}) } @selected_and_rels;
+
+    if ($opts->{single}) {
+        if ($opts->{oldest}) {
+            @selected_and_rels = @selected_and_rels ? ($selected_and_rels[-1]) : ();
+        } else {
+            @selected_and_rels = @selected_and_rels ? ($selected_and_rels[0]) : ();
+        }
+    }
+
+    if ($opts->{detail}) {
+        @selected_and_rels;
+    } else {
+        map {$_->{version}} @selected_and_rels;
+    }
 }
 
 sub select_release {
-    my $opts = ref $_[0] eq 'HASH' ? {%{shift}} : {};
+    my $opts = ref $_[0] eq 'HASH' ? {%{shift @_}} : {};
     my $expr = shift;
     my $rels = shift;
 
@@ -299,21 +554,19 @@ Some examples on selecting release(s):
 
 =head1 FUNCTIONS
 
-=head2 select_release
+=head2 parse_releases_expr
 
-Usage:
+ my $parsed = parse_releases_expr($expr_str);
 
- my $rel = select_release( [ \%opts , ] $expr, \@releases );
-
-Equivalent to C<< select_releases({%opts, single=>1}, $expr, \@releases) >>. See
-L</select_releases> for more details on list of known options.
+Parse an expression string and return parsed structure. Mostly for internal use
+only.
 
 =head2 select_releases
 
  my @rels = select_release( [ \%opts , ] $expr, \@releases );
 
 Select releases from C<@releases> using expression C<$expr>. Will die on invalid
-syntax in expression.
+syntax in expression or on invalid entry in C<@releases>.
 
 Known options:
 
@@ -335,6 +588,15 @@ requested, the newest is returned. If this option is set to true, then the
 oldest will be returned instead.
 
 =back
+
+=head2 select_release
+
+Usage:
+
+ my $rel = select_release( [ \%opts , ] $expr, \@releases );
+
+Equivalent to C<< select_releases({%opts, single=>1}, $expr, \@releases) >>. See
+L</select_releases> for more details on list of known options.
 
 
 =head1 TODO
