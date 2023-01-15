@@ -390,7 +390,9 @@ sub select_release {
     my $rels = shift;
 
     $opts->{single} = 1;
-    select_releases($opts, $expr, $rels);
+    my @rels = select_releases($opts, $expr, $rels);
+    return undef unless @rels;
+    $rels[0];
 }
 
 1;
