@@ -391,7 +391,7 @@ sub select_release {
 
     $opts->{single} = 1;
     my @rels = select_releases($opts, $expr, $rels);
-    return undef unless @rels;
+    return undef unless @rels; ## no critic: Subroutines::ProhibitExplicitReturnUndef
     $rels[0];
 }
 
