@@ -238,8 +238,8 @@ sub select_releases {
                 die "releases[$i]: Invalid version '$rel->{version}': $@";
             }
             if (defined $last_verobj) {
-                unless ($verobj < $last_verobj) {
-                    die "releases[$i]: Not older than previous record; releases must contain release in descending order";
+                if ($verobj > $last_verobj) {
+                    die "releases[$i]: Version ($verobj) newer than previous record's version ($last_verobj); releases must contain release in descending order";
                 }
             }
             $last_verobj = $verobj;
