@@ -89,7 +89,7 @@ our $RE =
                           # ver_comp
                           (?: version \s*)?
                           ((?&OP))? \s*
-                          (?{ [$^R, {type=>"version", op=> $^N // "=" }] })
+                          (?{ [$^R, {type=>"version_comp", op=> $^N // "=" }] })
                           (?:
                               ((?&VER_VALUE))
                               (?{ $^R->[0][1]{val} = $^R->[1]; $^R->[0] })
@@ -103,7 +103,7 @@ our $RE =
                           # date_comp
                           date \s*
                           ((?&OP)) \s*
-                          (?{ [$^R, {type=>"date", op=> $^N }] })
+                          (?{ [$^R, {type=>"date_comp", op=> $^N }] })
                           (?:
                               # DATE_VALUE
                               \{ ([^\{]+) \}
@@ -118,7 +118,7 @@ our $RE =
                           # author_comp
                           author \s*
                           ((?&OP)) \s*
-                          (?{ [$^R, {type=>"author", op=> $^N }] })
+                          (?{ [$^R, {type=>"author_comp", op=> $^N }] })
                           (?:
                               # STR_VALUE
                               (\" (?:[^"]+|\\\\|\\")* \")
@@ -136,7 +136,7 @@ our $RE =
               )
 
               (?<VER_VALUE>
-                  ((?&VER_LITERAL)) \s*
+                  ((?&VER_TERM)) \s*
                   (?{ [$^R, {literal=>$^N, offset=>0}] })
                   (?:
                       \s* ([+-] \s* [0-9]+) \s*
@@ -147,6 +147,17 @@ our $RE =
               (?<REGEX>
                   (/(?:[^/]+|\\/)*/)
                   (?{ [$^R, {regexp=>_parse_regexp($^N)}] })
+              )
+
+              (?<VER_TERM>
+                  ((?&VER_LITERAL))
+              |
+                  # VER_FUNC
+                  (latest|oldest) \s* \( \s*
+                  (?{ [$^R, {type=>"version_func", func=>$^N, args=>[]}] })
+                  ((?&EXPR))
+                  (?{ $^R->[0][1]{args} = [$^R->[1]]; $^R->[0] })
+                  \) \s*
               )
 
               (?<VER_LITERAL>
@@ -258,7 +269,7 @@ sub select_releases {
             my $type = $comp_pexpr->{type};
             my $op   = $comp_pexpr->{op};
             my $code;
-            if ($type eq 'version') {
+            if ($type eq 'version_comp') {
                 if ($op eq '=') {
                     die "Version literal expected after '='" unless defined $comp_pexpr->{val}{literal};
                     my ($ver, $verobj) = _get_verobj($comp_pexpr->{val}, $rels);
@@ -292,7 +303,7 @@ sub select_releases {
                 } else {
                     die "BUG: Unknown operator '$op'";
                 }
-            } elsif ($type eq 'author') {
+            } elsif ($type eq 'author_comp') {
                 if ($op eq '=') {
                     die "String literal expected after '='" unless defined $comp_pexpr->{val}{literal};
                     $code = sub { die "Release $_[0]{version} does not have author" unless defined $_[0]{author}; lc($_[0]{author}) eq lc($comp_pexpr->{val}{literal}) };
@@ -320,7 +331,7 @@ sub select_releases {
                 } else {
                     die "BUG: Unknown operator '$op'";
                 }
-            } elsif ($type eq 'date') {
+            } elsif ($type eq 'date_comp') {
                 require DateTime;
                 require DateTime::Format::Natural;
                 if ($op eq '=') {
@@ -511,47 +522,6 @@ Some examples on selecting release(s):
 
  # select releases, returns empty list when no releases are selected
  my $rel = select_releases('>= latest-2 & <= latest', \@releases);   # => 0.015, 0.014, 0.013
-
-
-=head2 Expression grammar
-
- EXPR ::= AND_EXPR ( ("," | "|") AND_EXPR )*
-
- AND_EXPR ::= SIMPLE_EXPR ( "&" SIMPLE_EXPR )*
-
- SIMPLE_EXPR ::= COMP
-
- COMP ::= VER_COMP
-        | DATE_COMP
-        | AUTHOR_COMP
-
- VER_COMP ::= "version" OP VER_VALUE
-            | OP VER_VALUE
-            | VER_VALUE              ; for when OP ='='
-
- DATE_COMP ::= "date" OP DATE_VAL
-
- AUTHOR_COMP ::= "author" OP STR_VAL
-
- OP ::= "=" | "!=" | ">" | ">=" | "<" | "<=" | "=~" | "!~"
-
- VER_VALUE ::= VER_LITERAL
-             | VER_OFFSET
-
- VER_OFFSET ::= VER_LITERAL ("+" | "-") [0-9]+
-
- STR_VAL ::= STR_LITERAL
-
- STR_LITERAL ::= '"' ( [^"\] | "\\" | "\" '"' )* '"'
-
- DATE_VAL ::= DATE_LITERAL
-
- DATE_LITERAL ::= "{" [^{]+ "}"
-
- VER_LITERAL ::= ("v")? [0-9]+ ( "." [0-9]+ )*
-               | ("v")? [0-9]+ ( "." [0-9]+ )+ ( "_" [0-9]+ )?
-               | "latest"
-               | "oldest"
 
 
 =head1 FUNCTIONS
